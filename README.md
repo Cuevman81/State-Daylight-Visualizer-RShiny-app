@@ -1,4 +1,4 @@
-# State-Daylight-Visualizer-RShiny-app
+# State_Daylight_Visualizer_RShiny_app
 An R Shiny App that generates visualizations for annual sunlight patterns across any U.S. state. It calculates and plots key solar events, including sunrise/sunset times, daylight hours, sun angle, twilight duration, and solstices. The dashboard is fully dynamic and cached for speed.
 
 > A dynamic R Shiny dashboard for visualizing annual sunlight patterns across any U.S. state. Select a state to generate a full suite of plots for key solar events like sunrise/sunset times, daylight hours, sun angle, twilight duration, and solstices.
@@ -52,8 +52,8 @@ To run this application on your own machine, follow these steps.
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/Cuevman81/State-Daylight-Visualizer-RShiny-app.git
-    cd State-Daylight-Visualizer-RShiny-app
+    git clone https://github.com/Cuevman81/State_Daylight_Visualizer_RShiny_app.git
+    cd State_Daylight_Visualizer_RShiny_app
     ```
 
 2.  **Install required packages:**
