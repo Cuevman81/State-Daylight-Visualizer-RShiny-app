@@ -54,8 +54,8 @@ To run this application on your own machine, follow these steps.
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-username/R-Sun-Almanac.git
-    cd R-Sun-Almanac
+    git clone https://github.com/Cuevman81/State-Daylight-Visualizer-RShiny-app.git
+    cd State-Daylight-Visualizer-RShiny-app
     ```
 
 2.  **Install required packages:**
