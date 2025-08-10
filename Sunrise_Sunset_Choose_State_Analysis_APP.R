@@ -35,15 +35,15 @@ if (!dir.exists("cache")) {
 # 1. HELPER FUNCTIONS (WRAPPING YOUR SCRIPT'S LOGIC)
 # ==============================================================================
 
-# This massive function runs all the data processing and returns a list of data frames
-get_sun_data <- function(state_name) {
+# This massive function now accepts the year as an argument
+get_sun_data <- function(state_name, analysis_year) {
   
   # --- Caching Logic ---
-  cache_version <- "v2.1"
-  cache_file <- file.path("cache", paste0("daylight_data_cache_", cache_version, "_", state_name, "_", ANALYSIS_YEAR, ".rds"))
+  cache_version <- "v2.2" # Incremented version for new year logic
+  cache_file <- file.path("cache", paste0("daylight_data_cache_", cache_version, "_", state_name, "_", analysis_year, ".rds"))
   
   if (file.exists(cache_file)) {
-    shiny::showNotification(paste("Loading cached data for", state_name), type = "message")
+    shiny::showNotification(paste("Loading cached data for", state_name, " (", analysis_year, ")"), type = "message")
     cached_data <- readRDS(cache_file)
     return(cached_data)
   }
@@ -58,10 +58,7 @@ get_sun_data <- function(state_name) {
     st_cast("POLYGON")
   
   bbox <- st_bbox(state_sf_polygon)
-  grid_points <- expand.grid(
-    lon = seq(bbox["xmin"], bbox["xmax"], length.out = 100),
-    lat = seq(bbox["ymin"], bbox["ymax"], length.out = 100)
-  )
+  grid_points <- expand.grid(lon = seq(bbox["xmin"], bbox["xmax"], length.out = 100), lat = seq(bbox["ymin"], bbox["ymax"], length.out = 100))
   grid_sf <- st_as_sf(grid_points, coords = c("lon", "lat"), crs = 4326)
   state_grid_sf <- st_filter(grid_sf, state_sf_polygon)
   
@@ -98,7 +95,7 @@ get_sun_data <- function(state_name) {
   
   final_data_grid <- tidyr::crossing(month = 1:12, state_grid_points)
   daylight_changes <- future_pmap_dbl(
-    .l = list(lat = final_data_grid$lat, lon = final_data_grid$lon, year = ANALYSIS_YEAR, month = final_data_grid$month),
+    .l = list(lat = final_data_grid$lat, lon = final_data_grid$lon, year = analysis_year, month = final_data_grid$month),
     .f = ~calculate_monthly_daylight_change(..1, ..2, ..3, ..4),
     .progress = TRUE
   )
@@ -106,7 +103,7 @@ get_sun_data <- function(state_name) {
     mutate(daylight_change_min = daylight_changes, month_name = factor(month.name[month], levels = month.name))
   
   daily_data <- expand.grid(
-    date = seq(ymd(paste0(ANALYSIS_YEAR, "-01-01")), ymd(paste0(ANALYSIS_YEAR, "-12-31")), by = "day"),
+    date = seq(ymd(paste0(analysis_year, "-01-01")), ymd(paste0(analysis_year, "-12-31")), by = "day"),
     location = points_of_interest$location
   ) %>%
     left_join(points_of_interest, by = "location") %>%
@@ -124,7 +121,7 @@ get_sun_data <- function(state_name) {
   }
   daylight_summary <- tidyr::crossing(month = 1:12, points_of_interest) %>%
     rowwise() %>%
-    mutate(daylight_hours = calculate_end_of_month_daylight(lat, lon, ANALYSIS_YEAR, month)) %>%
+    mutate(daylight_hours = calculate_end_of_month_daylight(lat, lon, analysis_year, month)) %>%
     ungroup() %>%
     select(month, location, daylight_hours) %>%
     pivot_wider(names_from = location, values_from = daylight_hours) %>%
@@ -165,11 +162,15 @@ ui <- fluidPage(
   sidebarLayout(
     sidebarPanel(
       h4("Instructions"),
-      p("Select a U.S. state from the dropdown menu and click the button to generate a full suite of daylight and solar analysis plots for the year 2025."),
+      p("Select a U.S. state and a year, then click the button to generate a full suite of daylight and solar analysis plots."),
       
       selectInput("state", "Choose a State:",
                   choices = toTitleCase(state.name),
                   selected = "Mississippi"),
+      
+      # ADDED YEAR INPUT            
+      numericInput("year", "Choose a Year:",
+                   value = 2025, min = 1950, max = 2050, step = 1),
       
       actionButton("go", "Generate Plots", icon = icon("chart-line"), class = "btn-primary btn-lg"),
       
@@ -202,17 +203,16 @@ ui <- fluidPage(
 # ==============================================================================
 server <- function(input, output, session) {
   
-  # A reactiveVal to store the results of the big calculation
+  # A reactiveVal to store the results of the big calculation.
+  # By REMOVING `ignoreNULL = FALSE`, this will now wait for the first button click.
   sun_data <- eventReactive(input$go, {
-    # We use ignoreNULL = FALSE so that the app can run on startup with the default state
-    ignoreNULL = FALSE
-    get_sun_data(tolower(input$state))
+    get_sun_data(tolower(input$state), input$year)
   })
   
   output$plot_header <- renderText({
     # Only show the header after the data is calculated
     req(sun_data())
-    paste("Displaying Plots for:", toTitleCase(input$state))
+    paste("Displaying Plots for:", toTitleCase(input$state), " (", input$year, ")")
   })
   
   # --- RENDER ALL 10 PLOTS ---
@@ -231,7 +231,7 @@ server <- function(input, output, session) {
       geom_text_contour(aes(z = daylight_change_min), stroke = 0.2, check_overlap = TRUE, size = 2.5, breaks = contour_breaks) +
       state_border + facet_wrap(~ facet_label, ncol = 4) +
       scale_fill_gradient2(name = "Change (min)", low = "darkblue", mid = "white", high = "darkred", midpoint = 0, na.value = "transparent") +
-      labs(title = paste("Monthly Change in Daylight Hours Across", toTitleCase(input$state), ANALYSIS_YEAR),
+      labs(title = paste("Monthly Change in Daylight Hours Across", toTitleCase(input$state), input$year),
            subtitle = "Change from the first day to the last day of each month (100x100 grid resolution)",
            x = "Longitude", y = "Latitude", caption = PLOT_CAPTION) +
       theme_minimal(base_size = 10) +
@@ -248,9 +248,14 @@ server <- function(input, output, session) {
     
     ggplot(df$daily_data, aes(x = date, y = daylight_hours, color = location)) +
       geom_line(linewidth = 1.2) +
-      scale_color_manual(name = paste("Location in", toTitleCase(input$state)), values = c("north" = "darkred", "center" = "darkgreen", "south" = "darkblue"), labels = c("North", "Center", "South")) +
+      scale_color_manual(
+        name = paste("Location in", toTitleCase(input$state)), 
+        values = c("north" = "darkred", "center" = "darkgreen", "south" = "darkblue"), 
+        # FIX: Use a named vector for labels to ensure they match the values correctly
+        labels = c("north" = "North", "center" = "Center", "south" = "South")
+      ) +
       scale_x_date(date_breaks = "1 month", date_labels = "%b") +
-      labs(title = paste("Annual Daylight Curve for", toTitleCase(input$state)),
+      labs(title = paste("Annual Daylight Curve for", toTitleCase(input$state), "(", input$year, ")"),
            subtitle = "Total hours of daylight per day shows longer summer days in the north",
            x = "Month", y = "Hours of Daylight", caption = PLOT_CAPTION) +
       theme_minimal(base_size = 14) +
@@ -310,8 +315,16 @@ server <- function(input, output, session) {
   output$p5_sunrise_sunset <- renderPlot({
     df <- sun_data()
     req(df)
+    
+    # Dynamically find DST dates for the selected year
+    all_dates <- seq(ymd(paste0(input$year, "-01-01")), ymd(paste0(input$year, "-12-31")), by = "day")
+    tz_abbr <- format(with_tz(all_dates, df$analysis_timezone), "%Z")
+    dst_changes <- all_dates[which(tz_abbr != lag(tz_abbr))]
+    spring_forward_date <- dst_changes[1]
+    fall_back_date <- dst_changes[2]
+    
     center_location <- df$points_of_interest %>% filter(location == "center")
-    sunrise_sunset_data <- data.frame(date = seq(ymd(paste0(ANALYSIS_YEAR, "-01-01")), ymd(paste0(ANALYSIS_YEAR, "-12-31")), by = "day"))
+    sunrise_sunset_data <- data.frame(date = all_dates)
     sun_times_df <- getSunlightTimes(date = sunrise_sunset_data$date, lat = center_location$lat, lon = center_location$lon)
     dummy_date_for_y_axis <- as.Date("1970-01-01")
     sunrise_sunset_data <- sunrise_sunset_data %>%
@@ -322,27 +335,34 @@ server <- function(input, output, session) {
              sunset_time_for_plot = ymd_hms(paste(dummy_date_for_y_axis, format(sunset_local, "%H:%M:%S")))) %>%
       pivot_longer(cols = c(sunrise_time_for_plot, sunset_time_for_plot), names_to = "event", values_to = "time_for_plot")
     
-    ggplot(sunrise_sunset_data, aes(x = date, y = time_for_plot, color = event)) +
+    p <- ggplot(sunrise_sunset_data, aes(x = date, y = time_for_plot, color = event)) +
       geom_line(linewidth = 1.2) +
       scale_y_datetime(date_labels = "%I:%M %p", date_breaks = "1 hour") +
       scale_x_date(date_breaks = "1 month", date_labels = "%b", expand = c(0.01, 0.01)) +
       scale_color_manual(name = "Event", values = c("sunrise_time_for_plot" = "darkorange", "sunset_time_for_plot" = "darkblue"), labels = c("Sunrise", "Sunset")) +
-      geom_vline(xintercept = as.Date(paste0(ANALYSIS_YEAR, "-03-09")), linetype = "dashed", alpha = 0.5) +
-      geom_vline(xintercept = as.Date(paste0(ANALYSIS_YEAR, "-11-02")), linetype = "dashed", alpha = 0.5) +
-      annotate("text", x = as.Date(paste0(ANALYSIS_YEAR, "-03-09")), y = as.POSIXct("1970-01-01 08:00:00"), label = "Spring Forward", angle = 90, vjust = -0.5, size = 3) +
-      annotate("text", x = as.Date(paste0(ANALYSIS_YEAR, "-11-02")), y = as.POSIXct("1970-01-01 08:00:00"), label = "Fall Back", angle = 90, vjust = -0.5, size = 3) +
-      labs(title = paste("Sunrise and Sunset Times Throughout", ANALYSIS_YEAR, "in Central", toTitleCase(input$state)),
-           subtitle = paste0("Times shown in local time (", format(with_tz(ymd(paste0(ANALYSIS_YEAR, "-01-01")), df$analysis_timezone), "%Z"),"/",format(with_tz(ymd(paste0(ANALYSIS_YEAR, "-07-01")), df$analysis_timezone), "%Z"),") - note the jumps at daylight saving transitions"),
+      labs(title = paste("Sunrise and Sunset Times Throughout", input$year, "in Central", toTitleCase(input$state)),
+           subtitle = paste0("Times shown in local time (", format(with_tz(ymd(paste0(input$year, "-01-01")), df$analysis_timezone), "%Z"),"/",format(with_tz(ymd(paste0(input$year, "-07-01")), df$analysis_timezone), "%Z"),") - note the jumps at daylight saving transitions"),
            x = "Month", y = "Time of Day", caption = PLOT_CAPTION) +
       theme_minimal(base_size = 14) +
       theme(legend.position = "top", plot.caption = element_text(hjust = 0, size = 8, color = "grey50"))
+    
+    # Add DST lines if they exist for that year
+    if(!is.na(spring_forward_date)) {
+      p <- p + geom_vline(xintercept = spring_forward_date, linetype = "dashed", alpha = 0.5) +
+        annotate("text", x = spring_forward_date, y = as.POSIXct("1970-01-01 08:00:00"), label = "Spring Forward", angle = 90, vjust = -0.5, size = 3)
+    }
+    if(!is.na(fall_back_date)) {
+      p <- p + geom_vline(xintercept = fall_back_date, linetype = "dashed", alpha = 0.5) +
+        annotate("text", x = fall_back_date, y = as.POSIXct("1970-01-01 08:00:00"), label = "Fall Back", angle = 90, vjust = -0.5, size = 3)
+    }
+    print(p)
   })
   
   output$p6_solar_noon <- renderPlot({
     df <- sun_data()
     req(df)
     center_location <- df$points_of_interest %>% filter(location == "center")
-    solar_noon_data <- data.frame(date = seq(ymd(paste0(ANALYSIS_YEAR, "-01-01")), ymd(paste0(ANALYSIS_YEAR, "-12-31")), by = "day"))
+    solar_noon_data <- data.frame(date = seq(ymd(paste0(input$year, "-01-01")), ymd(paste0(input$year, "-12-31")), by = "day"))
     sun_times_noon <- getSunlightTimes(date = solar_noon_data$date, lat = center_location$lat, lon = center_location$lon)
     solar_noon_data <- solar_noon_data %>%
       mutate(solarNoon = sun_times_noon$solarNoon,
@@ -354,7 +374,7 @@ server <- function(input, output, session) {
       geom_line(color = "darkgreen", linewidth = 1.2) +
       geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
       scale_x_date(date_breaks = "1 month", date_labels = "%b") +
-      labs(title = paste("Solar Noon Variation Throughout", ANALYSIS_YEAR, "in Central", toTitleCase(input$state)),
+      labs(title = paste("Solar Noon Variation Throughout", input$year, "in Central", toTitleCase(input$state)),
            subtitle = "Shows the equation of time effect - when sundials run fast or slow compared to clocks",
            x = "Month", y = "Deviation from Mean Solar Noon (minutes)", caption = PLOT_CAPTION) +
       theme_minimal(base_size = 14) + theme(plot.caption = element_text(hjust = 0, size = 8, color = "grey50"))
@@ -363,7 +383,7 @@ server <- function(input, output, session) {
   output$p7_twilight <- renderPlot({
     df <- sun_data()
     req(df)
-    twilight_data <- expand.grid(date = seq(ymd(paste0(ANALYSIS_YEAR, "-01-01")), ymd(paste0(ANALYSIS_YEAR, "-12-31")), by = "7 days"), location = df$points_of_interest$location) %>% 
+    twilight_data <- expand.grid(date = seq(ymd(paste0(input$year, "-01-01")), ymd(paste0(input$year, "-12-31")), by = "7 days"), location = df$points_of_interest$location) %>% 
       left_join(df$points_of_interest, by = "location")
     sun_times_twilight <- getSunlightTimes(data = twilight_data)
     twilight_data <- twilight_data %>%
@@ -373,9 +393,14 @@ server <- function(input, output, session) {
     
     ggplot(twilight_data, aes(x = date, y = total_civil_twilight, color = location)) +
       geom_line(linewidth = 1.2) + geom_point(size = 2, alpha = 0.6) +
-      scale_color_manual(name = paste("Location in", toTitleCase(input$state)), values = c("north" = "darkred", "center" = "darkgreen", "south" = "darkblue"), labels = c("North", "Center", "South")) +
+      scale_color_manual(
+        name = paste("Location in", toTitleCase(input$state)), 
+        values = c("north" = "darkred", "center" = "darkgreen", "south" = "darkblue"),
+        # FIX: Use a named vector for labels to ensure they match the values correctly
+        labels = c("north" = "North", "center" = "Center", "south" = "South")
+      ) +
       scale_x_date(date_breaks = "1 month", date_labels = "%b") +
-      labs(title = paste("Total Civil Twilight Duration Throughout", ANALYSIS_YEAR),
+      labs(title = paste("Total Civil Twilight Duration Throughout", input$year),
            subtitle = "Combined morning and evening twilight varies by latitude and season",
            x = "Month", y = "Total Civil Twilight (minutes)", caption = PLOT_CAPTION) +
       theme_minimal(base_size = 14) + theme(plot.caption = element_text(hjust = 0, size = 8, color = "grey50"))
@@ -419,9 +444,9 @@ server <- function(input, output, session) {
       geom_point(size = 6, color = "darkred") +
       geom_text_repel(aes(label = label), box.padding = 0.6, min.segment.length = 0, nudge_y = 0.25, direction = "y", segment.color = "grey50", size = 3.5) +
       geom_text_repel(aes(label = date_time_label), nudge_y = -0.15, direction = "x", segment.color = "grey50", box.padding = 0.1, point.padding = 0.2, min.segment.length = 0, max.overlaps = Inf, size = 2.8, fontface = "bold", lineheight = 0.9) +
-      scale_x_date(date_breaks = "1 month", date_labels = "%b", limits = c(ymd(paste0(ANALYSIS_YEAR, "-01-01")), ymd(paste0(ANALYSIS_YEAR, "-12-31")))) +
+      scale_x_date(date_breaks = "1 month", date_labels = "%b", limits = c(ymd(paste0(input$year, "-01-01")), ymd(paste0(input$year, "-12-31")))) +
       ylim(0.4, 1.6) +
-      labs(title = paste("Calendar of Extreme Sunrise/Sunset Events in Central", toTitleCase(input$state), "for", ANALYSIS_YEAR),
+      labs(title = paste("Calendar of Extreme Sunrise/Sunset Events in Central", toTitleCase(input$state), "for", input$year),
            subtitle = "Note: Earliest sunrise and latest sunset occur on different days than the solstice",
            x = "Date", y = "", caption = PLOT_CAPTION) +
       theme_minimal(base_size = 14) +
@@ -439,17 +464,22 @@ server <- function(input, output, session) {
       altitude_rad <- pi/2 - abs(lat_rad - declination)
       altitude_rad * 180 / pi
     }
-    sun_angle_data <- expand.grid(date = seq(ymd(paste0(ANALYSIS_YEAR, "-01-01")), ymd(paste0(ANALYSIS_YEAR, "-12-31")), by = "day"), location = df$points_of_interest$location) %>%
+    sun_angle_data <- expand.grid(date = seq(ymd(paste0(input$year, "-01-01")), ymd(paste0(input$year, "-12-31")), by = "day"), location = df$points_of_interest$location) %>%
       left_join(df$points_of_interest, by = "location") %>%
       mutate(day_of_year = yday(date), altitude_degrees = calculate_solar_noon_altitude(lat, day_of_year))
     
     ggplot(sun_angle_data, aes(x = date, y = altitude_degrees, color = location)) +
       geom_line(linewidth = 1.2) + geom_hline(yintercept = 90, linetype = "dotted", alpha = 0.5) + geom_hline(yintercept = 0, linetype = "solid", alpha = 0.3) +
-      annotate("text", x = ymd(paste0(ANALYSIS_YEAR, "-06-21")), y = 85, label = "Summer Solstice", size = 3, angle = 0, vjust = -0.5) +
-      annotate("text", x = ymd(paste0(ANALYSIS_YEAR, "-12-21")), y = 40, label = "Winter Solstice", size = 3, angle = 0, vjust = -0.5) +
-      scale_color_manual(name = paste("Location in", toTitleCase(input$state)), values = c("north" = "darkred", "center" = "darkgreen", "south" = "darkblue"), labels = c("North", "Center", "Center")) +
+      annotate("text", x = ymd(paste0(input$year, "-06-21")), y = 85, label = "Summer Solstice", size = 3, angle = 0, vjust = -0.5) +
+      annotate("text", x = ymd(paste0(input$year, "-12-21")), y = 40, label = "Winter Solstice", size = 3, angle = 0, vjust = -0.5) +
+      scale_color_manual(
+        name = paste("Location in", toTitleCase(input$state)), 
+        values = c("north" = "darkred", "center" = "darkgreen", "south" = "darkblue"),
+        # FIX: Use a named vector for labels to ensure they match the values correctly
+        labels = c("north" = "North", "center" = "Center", "south" = "South")
+      ) +
       scale_x_date(date_breaks = "1 month", date_labels = "%b") + scale_y_continuous(breaks = seq(0, 90, by = 15), labels = function(x) paste0(x, "°")) +
-      labs(title = paste("Sun Angle at Solar Noon Throughout", ANALYSIS_YEAR, "in", toTitleCase(input$state)),
+      labs(title = paste("Sun Angle at Solar Noon Throughout", input$year, "in", toTitleCase(input$state)),
            subtitle = "Maximum elevation angle of the sun above the horizon each day",
            x = "Month", y = "Sun Altitude Angle", caption = PLOT_CAPTION) +
       theme_minimal(base_size = 14) + theme(legend.position = "top", plot.caption = element_text(hjust = 0, size = 8, color = "grey50"))
@@ -465,12 +495,12 @@ server <- function(input, output, session) {
       altitude_rad <- pi/2 - abs(lat_rad - declination)
       altitude_rad * 180 / pi
     }
-    sun_angle_data <- expand.grid(date = seq(ymd(paste0(ANALYSIS_YEAR, "-01-01")), ymd(paste0(ANALYSIS_YEAR, "-12-31")), by = "day"), location = df$points_of_interest$location) %>%
+    sun_angle_data <- expand.grid(date = seq(ymd(paste0(input$year, "-01-01")), ymd(paste0(input$year, "-12-31")), by = "day"), location = df$points_of_interest$location) %>%
       left_join(df$points_of_interest, by = "location") %>%
       mutate(day_of_year = yday(date), altitude_degrees = calculate_solar_noon_altitude(lat, day_of_year))
     center_sun_data <- sun_angle_data %>% filter(location == "center")
     key_dates <- center_sun_data %>%
-      filter(date %in% c(ymd(paste0(ANALYSIS_YEAR, "-03-20")), ymd(paste0(ANALYSIS_YEAR, "-06-21")), ymd(paste0(ANALYSIS_YEAR, "-09-23")), ymd(paste0(ANALYSIS_YEAR, "-12-21")))) %>%
+      filter(date %in% c(ymd(paste0(input$year, "-03-20")), ymd(paste0(input$year, "-06-21")), ymd(paste0(input$year, "-09-23")), ymd(paste0(input$year, "-12-21")))) %>%
       mutate(label = c("Spring\nEquinox", "Summer\nSolstice", "Fall\nEquinox", "Winter\nSolstice"))
     min_angle <- floor(min(center_sun_data$altitude_degrees) / 5) * 5
     max_angle <- ceiling(max(center_sun_data$altitude_degrees) / 5) * 5
@@ -481,12 +511,11 @@ server <- function(input, output, session) {
       geom_text(data = key_dates, aes(label = paste0(round(altitude_degrees, 1), "°")), vjust = 1.5, size = 3, fontface = "bold") +
       scale_x_date(date_breaks = "1 month", date_labels = "%b") +
       scale_y_continuous(breaks = seq(min_angle, max_angle, by = 5), labels = function(x) paste0(x, "°"), limits = c(min_angle, max_angle)) +
-      labs(title = paste("Solar Noon Sun Angle in Central", toTitleCase(input$state), "for", ANALYSIS_YEAR),
+      labs(title = paste("Solar Noon Sun Angle in Central", toTitleCase(input$state), "for", input$year),
            subtitle = "The sun's maximum daily elevation varies by ~47° throughout the year",
            x = "Month", y = "Sun Altitude Angle at Solar Noon", caption = PLOT_CAPTION) +
       theme_minimal(base_size = 14) + theme(panel.grid.minor = element_blank(), plot.caption = element_text(hjust = 0, size = 8, color = "grey50"))
   })
-  
 }
 
 # ==============================================================================
